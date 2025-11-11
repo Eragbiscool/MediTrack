@@ -249,7 +249,7 @@ export function AddMedicineDialog({
               id="frequency"
               type="number"
               min="1"
-              max="10"
+              max="8"
               value={frequency}
               onChange={(e) => setFrequency(e.target.value)}
               required

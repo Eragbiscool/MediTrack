@@ -1,8 +1,7 @@
-import { useState, useEffect } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useEffect } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { Clock, Pill, CheckCircle2, AlertCircle } from "lucide-react";
 import { toast } from "sonner";
 import { getMedicineLogsForDateLocal, updateMedicineLogStatusLocal } from "@/data/db";
@@ -11,7 +10,7 @@ interface Medicine {
   id: string;
   name: string;
   frequency: number;
-  timing: string;
+  timing: "before_meal" | "after_meal" | "anytime";
   start_date: string;
   duration_days: number;
   is_active: boolean;
@@ -34,17 +33,18 @@ interface TodaysMedicinesProps {
 export function TodaysMedicines({ userId, medicines }: TodaysMedicinesProps) {
   const queryClient = useQueryClient();
   const todayISO = new Date().toISOString().split("T")[0];
-  const [logs, setLogs] = useState<MedicineLog[]>([]);
 
-  // Fetch logs
-  const fetchLogs = async () => {
-    const fetched = await getMedicineLogsForDateLocal(userId, todayISO);
-    setLogs(fetched);
-  };
+  // Use React Query with EXACT key used in useMedicineScheduler
+  const { data: logs = [], refetch } = useQuery({
+    queryKey: ["medicine_logs", userId, todayISO],
+    queryFn: () => getMedicineLogsForDateLocal(userId, todayISO),
+    staleTime: 1000 * 30, // 30 seconds
+  });
 
+  // Backup: re-fetch when medicines change
   useEffect(() => {
-    fetchLogs();
-  }, [userId, todayISO, medicines]);
+    refetch();
+  }, [medicines, refetch]);
 
   // Mutation: Mark as taken
   const markTaken = useMutation({
@@ -57,15 +57,15 @@ export function TodaysMedicines({ userId, medicines }: TodaysMedicinesProps) {
       scheduled.setHours(h, m, 0, 0);
 
       const diffMs = now.getTime() - scheduled.getTime();
-      const isEarly = diffMs < -2 * 60 * 60 * 1000; // >2h early
-      const isLate = diffMs > 60 * 60 * 1000;       // >1h late
+      const isEarly = diffMs < -2 * 60 * 60 * 1000;
+      const isLate = diffMs > 60 * 60 * 1000;
 
       await updateMedicineLogStatusLocal(logId, "taken", takenAt);
       return { takenAt, isEarly, isLate };
     },
-    onSuccess: ({ isEarly, isLate }) => {
-      toast.success(isEarly || isLate ? "Taken off-schedule!" : "Taken on time!");
-      fetchLogs();
+    onSuccess: () => {
+      refetch(); // This line fixes the button
+      toast.success("Medicine marked as taken!");
     },
     onError: () => {
       toast.error("Failed to mark as taken");
@@ -98,17 +98,26 @@ export function TodaysMedicines({ userId, medicines }: TodaysMedicinesProps) {
     const [h, m] = scheduledTime.split(":").map(Number);
     const scheduled = new Date();
     scheduled.setHours(h, m, 0, 0);
-    const now = new Date();
-    const diffHours = Math.round((scheduled.getTime() - now.getTime()) / (1000 * 60 * 60));
 
-    if (diffHours > 0) {
-      return `${diffHours}h later, ${getTimingLabel(timing)}`;
-    } else if (diffHours === 0) {
-      const diffMins = Math.round((scheduled.getTime() - now.getTime()) / (1000 * 60));
-      return diffMins > 0 ? `${diffMins}m later, ${getTimingLabel(timing)}` : `now, ${getTimingLabel(timing)}`;
-    } else {
-      return null; // past → will show taken status
+    const now = new Date();
+    const todayMidnight = new Date();
+    todayMidnight.setHours(0, 0, 0, 0);
+    const tomorrowMidnight = new Date(todayMidnight);
+    tomorrowMidnight.setDate(tomorrowMidnight.getDate() + 1);
+
+    // Only show relative time if scheduled is TODAY
+    if (scheduled >= todayMidnight && scheduled < tomorrowMidnight) {
+      const diffHours = Math.round((scheduled.getTime() - now.getTime()) / (1000 * 60 * 60));
+      if (diffHours > 0) {
+        return `${diffHours}h later, ${getTimingLabel(timing)}`;
+      } else if (diffHours === 0) {
+        const diffMins = Math.round((scheduled.getTime() - now.getTime()) / (1000 * 60));
+        return diffMins > 0 ? `${diffMins}m later, ${getTimingLabel(timing)}` : `now, ${getTimingLabel(timing)}`;
+      }
     }
+
+    // For doses after midnight → just show time
+    return null;
   };
 
   const isOffSchedule = (log: MedicineLog) => {
@@ -167,15 +176,13 @@ export function TodaysMedicines({ userId, medicines }: TodaysMedicinesProps) {
                     <p className="text-xs text-muted-foreground">
                       {relativeHint || (
                         isTaken ? (
-                          <>
-                            <span className={offSchedule ? "text-yellow-700" : "text-green-700"}>
-                              {offSchedule ? "Taken off-schedule" : "Taken"} at {formatTime12(log.taken_at!)}
-                            </span>
-                          </>
+                          <span className={offSchedule ? "text-yellow-700" : "text-green-700"}>
+                            {offSchedule ? "Taken off-schedule" : "Taken"} at {formatTime12(log.taken_at!)}
+                          </span>
                         ) : (
                           <>
                             <Clock className="w-3 h-3 inline mr-1" />
-                            {log.scheduled_time} ({getTimingLabel(med?.timing || "anytime")})
+                            {log.scheduled_time.substring(0, 5)} ({getTimingLabel(med?.timing || "anytime")})
                           </>
                         )
                       )}

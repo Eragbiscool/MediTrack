@@ -12,7 +12,6 @@ interface Medicine {
   timing: "before_meal" | "after_meal" | "anytime";
 }
 
-// Helper: get date-only (midnight) from ISO string
 const dateOnly = (iso: string) => {
   const d = new Date(iso.split("T")[0] + "T00:00:00");
   d.setHours(0, 0, 0, 0);
@@ -40,7 +39,6 @@ export function useMedicineScheduler(userId: string, medicines: Medicine[]) {
 
         if (today < start || today > end) continue;
 
-        // Fetch existing logs for this medicine + today
         const existing = await getMedicineLogsForDateLocal(userId, todayISO);
         const existingTimes = new Set(
           existing
@@ -48,18 +46,14 @@ export function useMedicineScheduler(userId: string, medicines: Medicine[]) {
             .map((l) => l.scheduled_time)
         );
 
-        // Decide dose times based on frequency + timing
         const times: string[] = [];
 
         if (med.frequency <= 3 && med.timing !== "anytime") {
-          // Fixed times: 8 AM, 2 PM, 8 PM
           const fixed = ["08:00:00", "14:00:00", "20:00:00"];
           times.push(...fixed.slice(0, med.frequency));
         } else {
-          // Evenly spaced across 24h, starting at 8 AM
           const interval = 24 / med.frequency;
-          let hour = 8; // start at 8 AM
-
+          let hour = 8;
           for (let i = 0; i < med.frequency; i++) {
             const h = Math.floor(hour);
             const m = Math.round((hour - h) * 60);
@@ -69,7 +63,6 @@ export function useMedicineScheduler(userId: string, medicines: Medicine[]) {
           }
         }
 
-        // Create missing logs
         for (const time of times) {
           if (!existingTimes.has(time)) {
             createPromises.push(
@@ -86,12 +79,13 @@ export function useMedicineScheduler(userId: string, medicines: Medicine[]) {
 
       if (createPromises.length > 0) {
         await Promise.all(createPromises);
+        // CRITICAL: Invalidate the exact query key used in TodaysMedicines
         queryClient.invalidateQueries({
-          queryKey: ["medicine-logs", userId, todayISO],
+          queryKey: ["medicine_logs", userId, todayISO],
         });
       }
     };
 
     createTodaysLogs();
-  }, [userId, medicines, queryClient]);
+  }, [userId, medicines, queryClient]); // Re-run when medicines change
 }
