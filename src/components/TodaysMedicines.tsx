@@ -1,18 +1,20 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { useState, useEffect } from "react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Calendar } from "lucide-react";
-import { getMedicineLogsForDateLocal, getMedicinesForUserLocal } from "@/data/db";
-import { useEffect } from "react";
+import { Clock, Pill, CheckCircle2, AlertCircle } from "lucide-react";
+import { toast } from "sonner";
+import { getMedicineLogsForDateLocal, updateMedicineLogStatusLocal } from "@/data/db";
 
 interface Medicine {
   id: string;
   name: string;
   frequency: number;
   timing: string;
-  duration_days: number;
   start_date: string;
+  duration_days: number;
+  is_active: boolean;
 }
 
 interface MedicineLog {
@@ -31,79 +33,181 @@ interface TodaysMedicinesProps {
 
 export function TodaysMedicines({ userId, medicines }: TodaysMedicinesProps) {
   const queryClient = useQueryClient();
-  const today = new Date().toISOString().split("T")[0];
+  const todayISO = new Date().toISOString().split("T")[0];
+  const [logs, setLogs] = useState<MedicineLog[]>([]);
 
-  const { data: todaysLogs } = useQuery({
-    queryKey: ["medicine-logs", userId, today],
-    queryFn: async () => {
-      // returns logs that belong to user's medicines for today
-      return await getMedicineLogsForDateLocal(userId, today);
+  // Fetch logs
+  const fetchLogs = async () => {
+    const fetched = await getMedicineLogsForDateLocal(userId, todayISO);
+    setLogs(fetched);
+  };
+
+  useEffect(() => {
+    fetchLogs();
+  }, [userId, todayISO, medicines]);
+
+  // Mutation: Mark as taken
+  const markTaken = useMutation({
+    mutationFn: async ({ logId, scheduledTime }: { logId: string; scheduledTime: string }) => {
+      const now = new Date();
+      const takenAt = now.toISOString();
+
+      const [h, m] = scheduledTime.split(":").map(Number);
+      const scheduled = new Date();
+      scheduled.setHours(h, m, 0, 0);
+
+      const diffMs = now.getTime() - scheduled.getTime();
+      const isEarly = diffMs < -2 * 60 * 60 * 1000; // >2h early
+      const isLate = diffMs > 60 * 60 * 1000;       // >1h late
+
+      await updateMedicineLogStatusLocal(logId, "taken", takenAt);
+      return { takenAt, isEarly, isLate };
+    },
+    onSuccess: ({ isEarly, isLate }) => {
+      toast.success(isEarly || isLate ? "Taken off-schedule!" : "Taken on time!");
+      fetchLogs();
+    },
+    onError: () => {
+      toast.error("Failed to mark as taken");
     },
   });
 
-  const markAsTaken = async (logId: string) => {
-    // simple local update: set status to taken and taken_at
-    const db = await import("@/data/db");
-    await (db.db as any).medicine_logs.update(logId, {
-      status: "taken",
-      taken_at: new Date().toISOString(),
-    });
-    queryClient.invalidateQueries({ queryKey: ["medicine-logs", userId, today] });
-    queryClient.invalidateQueries({ queryKey: ["medicines", userId] });
-  };
-
+  // Helpers
   const getMedicineName = (medicineId: string) => {
-    return medicines.find((m) => m.id === medicineId)?.name || "Unknown";
+    const med = medicines.find((m) => m.id === medicineId && m.is_active);
+    return med?.name || "Unknown";
   };
 
-  const getTimingLabel = (medicineId: string) => {
-    const timing = medicines.find((m) => m.id === medicineId)?.timing;
-    if (timing === "before_meal") return "Before Meal";
-    if (timing === "after_meal") return "After Meal";
-    return "Anytime";
+  const getTimingLabel = (timing: string) => {
+    switch (timing) {
+      case "before_meal": return "before meal";
+      case "after_meal": return "after meal";
+      default: return "anytime";
+    }
   };
 
-  const pendingCount = todaysLogs?.filter((log) => log.status === "pending").length || 0;
-  const takenCount = todaysLogs?.filter((log) => log.status === "taken").length || 0;
+  const formatTime12 = (iso: string) => {
+    return new Date(iso).toLocaleTimeString("en-US", {
+      hour: "numeric",
+      minute: "2-digit",
+      hour12: true,
+    });
+  };
+
+  const getRelativeTime = (scheduledTime: string, timing: string) => {
+    const [h, m] = scheduledTime.split(":").map(Number);
+    const scheduled = new Date();
+    scheduled.setHours(h, m, 0, 0);
+    const now = new Date();
+    const diffHours = Math.round((scheduled.getTime() - now.getTime()) / (1000 * 60 * 60));
+
+    if (diffHours > 0) {
+      return `${diffHours}h later, ${getTimingLabel(timing)}`;
+    } else if (diffHours === 0) {
+      const diffMins = Math.round((scheduled.getTime() - now.getTime()) / (1000 * 60));
+      return diffMins > 0 ? `${diffMins}m later, ${getTimingLabel(timing)}` : `now, ${getTimingLabel(timing)}`;
+    } else {
+      return null; // past → will show taken status
+    }
+  };
+
+  const isOffSchedule = (log: MedicineLog) => {
+    if (log.status !== "taken" || !log.taken_at) return false;
+    const [h, m] = log.scheduled_time.split(":").map(Number);
+    const scheduled = new Date();
+    scheduled.setHours(h, m, 0, 0);
+    const taken = new Date(log.taken_at);
+    const diffMs = taken.getTime() - scheduled.getTime();
+    return diffMs < -2 * 60 * 60 * 1000 || diffMs > 60 * 60 * 1000;
+  };
+
+  if (logs.length === 0) {
+    return (
+      <Card className="shadow-[var(--shadow-card)]">
+        <CardHeader>
+          <CardTitle>Today's Medicines</CardTitle>
+          <CardDescription>No medicines scheduled for today</CardDescription>
+        </CardHeader>
+      </Card>
+    );
+  }
 
   return (
-    <Card className="mb-6 shadow-[var(--shadow-card)] border-primary/20">
+    <Card className="shadow-[var(--shadow-card)] mb-6">
       <CardHeader>
-        <div className="flex items-center justify-between">
-          <div>
-            <CardTitle>Today's Medicines</CardTitle>
-            <div className="text-sm text-muted-foreground">
-              {pendingCount} pending, {takenCount} taken
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            <Badge>{today}</Badge>
-            <Calendar className="w-5 h-5 text-muted-foreground" />
-          </div>
-        </div>
+        <CardTitle>Today's Medicines</CardTitle>
+        <CardDescription>Mark when you take your dose</CardDescription>
       </CardHeader>
       <CardContent>
-        {todaysLogs && todaysLogs.length > 0 ? (
-          <div className="space-y-3">
-            {todaysLogs.map((log: MedicineLog) => (
-              <div key={log.id} className="flex items-center justify-between p-3 rounded-lg border border-border bg-card">
-                <div>
-                  <div className="font-semibold">{getMedicineName(log.medicine_id)}</div>
-                  <div className="text-xs text-muted-foreground">
-                    {getTimingLabel(log.medicine_id)} — {log.scheduled_time}
+        <div className="space-y-3">
+          {logs.map((log) => {
+            const med = medicines.find((m) => m.id === log.medicine_id);
+            const medName = getMedicineName(log.medicine_id);
+            const isTaken = log.status === "taken";
+            const offSchedule = isOffSchedule(log);
+            const relativeHint = !isTaken && med ? getRelativeTime(log.scheduled_time, med.timing) : null;
+
+            return (
+              <div
+                key={log.id}
+                className={`flex items-center justify-between p-3 rounded-lg border transition-all ${
+                  isTaken
+                    ? offSchedule
+                      ? "border-yellow-500/40 bg-yellow-50/60"
+                      : "border-green-500/40 bg-green-50/60"
+                    : "border-border bg-card"
+                }`}
+              >
+                <div className="flex items-center gap-3 flex-1">
+                  <div className="w-9 h-9 rounded-full flex items-center justify-center bg-primary/10">
+                    <Pill className="w-4 h-4 text-primary" />
+                  </div>
+                  <div className="flex-1">
+                    <p className="font-medium text-sm">{medName}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {relativeHint || (
+                        isTaken ? (
+                          <>
+                            <span className={offSchedule ? "text-yellow-700" : "text-green-700"}>
+                              {offSchedule ? "Taken off-schedule" : "Taken"} at {formatTime12(log.taken_at!)}
+                            </span>
+                          </>
+                        ) : (
+                          <>
+                            <Clock className="w-3 h-3 inline mr-1" />
+                            {log.scheduled_time} ({getTimingLabel(med?.timing || "anytime")})
+                          </>
+                        )
+                      )}
+                    </p>
                   </div>
                 </div>
-                <div className="flex items-center gap-2">
-                  <Button variant="ghost" onClick={() => markAsTaken(log.id)} disabled={log.status === "taken"}>
-                    Mark Taken
+
+                {isTaken ? (
+                  <Button variant="ghost" size="sm" className="h-8 gap-1.5" disabled>
+                    {offSchedule ? (
+                      <AlertCircle className="w-4 h-4 text-yellow-600" />
+                    ) : (
+                      <CheckCircle2 className="w-4 h-4 text-green-600" />
+                    )}
+                    <span className="text-xs">
+                      {offSchedule ? "Off-schedule" : "Taken"}
+                    </span>
                   </Button>
-                </div>
+                ) : (
+                  <Button
+                    size="sm"
+                    onClick={() => markTaken.mutate({ logId: log.id, scheduledTime: log.scheduled_time })}
+                    disabled={markTaken.isPending}
+                    className="h-8 text-xs"
+                  >
+                    {markTaken.isPending ? "Marking..." : "Mark Taken"}
+                  </Button>
+                )}
               </div>
-            ))}
-          </div>
-        ) : (
-          <div className="text-center py-8 text-muted-foreground">No medicines scheduled for today</div>
-        )}
+            );
+          })}
+        </div>
       </CardContent>
     </Card>
   );

@@ -32,6 +32,19 @@ export interface MedicineLog {
   created_at: string;
 }
 
+// Update log status
+export async function updateMedicineLogStatusLocal(
+  logId: string,
+  status: "taken" | "skipped",
+  takenAt?: string
+) {
+  const updates: Partial<MedicineLog> = { status };
+  if (takenAt) updates.taken_at = takenAt;
+  const count = await db.medicine_logs.update(logId, updates);
+  if (count === 0) throw new Error("Log not found");
+  return true;
+}
+
 class AppDB extends Dexie {
   users!: Dexie.Table<User, string>;
   medicines!: Dexie.Table<Medicine, string>;
@@ -70,30 +83,56 @@ export async function getUsersLocal() {
 }
 
 /* Medicine helpers */
-export async function createMedicineLocal(med: Omit<Medicine, "id" | "created_at" | "is_active">) {
+export async function createMedicineLocal(
+  med: Omit<Medicine, "id" | "created_at" | "is_active">
+) {
   const item: Medicine = {
     id: uuidv4(),
     ...med,
     created_at: new Date().toISOString(),
     is_active: true,
-  } as Medicine;
+  };
   await db.medicines.add(item);
   return item;
 }
 
-export async function getMedicinesForUserLocal(userId: string) {
-  return db.medicines.where("user_id").equals(userId).filter((m: Medicine) => m.is_active !== false).toArray();
+/**
+ * Update existing medicine
+ */
+export async function updateMedicineLocal(
+  medicine: Partial<Medicine> & { id: string }
+) {
+  const updated = await db.medicines.update(medicine.id, medicine);
+  if (updated === 0) throw new Error("Medicine not found");
+  const result = await db.medicines.get(medicine.id);
+  if (!result) throw new Error("Failed to retrieve updated medicine");
+  return result;
 }
 
+/**
+ * Get active medicines for user
+ */
+export async function getMedicinesForUserLocal(userId: string) {
+  return db.medicines
+    .where("user_id")
+    .equals(userId)
+    .filter((m) => m.is_active !== false)
+    .toArray();
+}
+
+/**
+ * Deactivate (soft-delete) a medicine
+ */
 export async function deactivateMedicineLocal(medicineId: string) {
-  const m = await db.medicines.get(medicineId);
-  if (!m) throw new Error("Medicine not found");
-  await db.medicines.update(medicineId, { is_active: false });
+  const count = await db.medicines.update(medicineId, { is_active: false });
+  if (count === 0) throw new Error("Medicine not found");
   return true;
 }
 
 /* Medicine log helpers */
-export async function createMedicineLogLocal(log: Omit<MedicineLog, "id" | "created_at">) {
+export async function createMedicineLogLocal(
+  log: Omit<MedicineLog, "id" | "created_at">
+) {
   const item: MedicineLog = {
     id: uuidv4(),
     ...log,
@@ -104,8 +143,11 @@ export async function createMedicineLogLocal(log: Omit<MedicineLog, "id" | "crea
 }
 
 export async function getMedicineLogsForDateLocal(userId: string, dateISO: string) {
-  // join: find medicine ids for user, then logs with scheduled_date
   const meds = await getMedicinesForUserLocal(userId);
   const ids = meds.map((m) => m.id);
-  return db.medicine_logs.where("scheduled_date").equals(dateISO).filter((l: MedicineLog) => ids.includes(l.medicine_id)).toArray();
+  return db.medicine_logs
+    .where("scheduled_date")
+    .equals(dateISO)
+    .filter((l) => ids.includes(l.medicine_id))
+    .toArray();
 }

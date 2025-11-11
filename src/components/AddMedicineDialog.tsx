@@ -11,23 +11,39 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
-import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
 import medicines from "@/data/medicines.json";
-import { createMedicineLocal } from "@/data/db";
-import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "@/components/ui/alert-dialog";
-import { useQuery } from '@tanstack/react-query';
-import { getMedicinesForUserLocal } from '@/data/db';
+import { createMedicineLocal, updateMedicineLocal } from "@/data/db";
+import { useQuery } from "@tanstack/react-query";
+import { getMedicinesForUserLocal } from "@/data/db";
+
+interface Medicine {
+  id: string;
+  user_id: string;
+  name: string;
+  frequency: number;
+  timing: "before_meal" | "after_meal" | "anytime";
+  start_date: string;
+  duration_days: number;
+  generic_name?: string;
+  dosage_form?: string;
+}
 
 interface AddMedicineDialogProps {
   userId: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   editingMedicine?: Medicine | null;
-  onRequestEdit?: (medicineId: string) => void;
+  onRequestEdit?: (medicineId: string | null) => void;
 }
 
-export function AddMedicineDialog({ userId, open, onOpenChange }: AddMedicineDialogProps) {
+export function AddMedicineDialog({
+  userId,
+  open,
+  onOpenChange,
+  editingMedicine,
+  onRequestEdit,
+}: AddMedicineDialogProps) {
   const [name, setName] = useState("");
   const [frequency, setFrequency] = useState("2");
   const [timing, setTiming] = useState<"before_meal" | "after_meal" | "anytime">("after_meal");
@@ -35,7 +51,25 @@ export function AddMedicineDialog({ userId, open, onOpenChange }: AddMedicineDia
   const [showSuggestions, setShowSuggestions] = useState(false);
   const queryClient = useQueryClient();
 
-  // Filter medicines based on input (match trade_name or company)
+  const isEditing = !!editingMedicine?.id;
+
+  // Pre-fill form when editing
+  useEffect(() => {
+    if (editingMedicine) {
+      setName(editingMedicine.name || "");
+      setFrequency(String(editingMedicine.frequency || 2));
+      setTiming(editingMedicine.timing);
+      setDurationDays(String(editingMedicine.duration_days || 7));
+    } else {
+      setName("");
+      setFrequency("2");
+      setTiming("after_meal");
+      setDurationDays("7");
+    }
+    setShowSuggestions(false);
+  }, [editingMedicine]);
+
+  // Suggestions based on input
   const suggestions = useMemo(() => {
     if (!name) return [];
     const s = name.toLowerCase().trim();
@@ -48,62 +82,99 @@ export function AddMedicineDialog({ userId, open, onOpenChange }: AddMedicineDia
       .slice(0, 8);
   }, [name]);
 
-  const addMedicine = useMutation({
-    mutationFn: async (medicine: {
-      user_id: string;
-      name: string;
-      frequency: number;
-      timing: string;
-      start_date: string;
-      duration_days: number;
-      generic_name?: string;
-      dosage_form?: string;
-    }) => {
-      return await createMedicineLocal(medicine as any);
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["medicines"] });
-      toast.success("Medicine added successfully!");
-      resetForm();
-      onOpenChange(false);
-    },
-    onError: () => {
-      toast.error("Failed to add medicine");
-    },
+  // Fetch existing medicines to check duplicates
+  const { data: existingMedicines } = useQuery({
+    queryKey: ["medicines", userId],
+    queryFn: () => getMedicinesForUserLocal(userId),
   });
 
-  const resetForm = () => {
-    setName("");
-    setFrequency("2");
-    setTiming("after_meal");
-    setDurationDays("7");
-    setShowSuggestions(false);
-  };
+  // Unified mutation: Add or Update
+  const mutation = useMutation({
+    mutationFn: async (medicine: any) => {
+      if (isEditing) {
+        return await updateMedicineLocal({
+          ...medicine,
+          id: editingMedicine.id,
+        });
+      }
+      return await createMedicineLocal(medicine);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["medicines", userId] });
+      toast.success(isEditing ? "Medicine updated!" : "Medicine added!");
+      onOpenChange(false);
+      onRequestEdit?.(null); // Clear edit mode
+    },
+    onError: () => {
+      toast.error(`Failed to ${isEditing ? "update" : "add"} medicine`);
+    },
+  });
 
   const handleSelectMedicine = (med: any) => {
     setName(med.trade_name || med.generic_with_strength || "");
     setShowSuggestions(false);
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name || !frequency || !durationDays) {
       toast.error("Please fill in all fields");
       return;
     }
 
-    // try to find selected suggestion to fill generic/dosage fields
-    const found = (medicines as any[]).find((m) => (m.trade_name || "").toLowerCase() === name.toLowerCase());
+    const now = new Date();
 
-    addMedicine.mutate({
+    // Check for duplicate active medicine (skip self when editing)
+    const duplicate = existingMedicines?.find((med: any) => {
+      if (isEditing && med.id === editingMedicine.id) return false;
+
+      const medStartDate = new Date(med.start_date);
+      const medEndDate = new Date(medStartDate);
+      medEndDate.setDate(medEndDate.getDate() + (med.duration_days || 0));
+
+      return (
+        med.name.toLowerCase() === name.toLowerCase() &&
+        medEndDate >= now
+      );
+    });
+
+    if (duplicate) {
+      const medEndDate = new Date(new Date(duplicate.start_date));
+      medEndDate.setDate(medEndDate.getDate() + (duplicate.duration_days || 0));
+
+      const formattedDate = medEndDate.toLocaleDateString(undefined, {
+        weekday: "short",
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+      });
+
+      toast.error(
+        `"${name}" is already active.\nYou can add it again after ${formattedDate}.`
+      );
+      return;
+    }
+
+    // Try to enrich with generic/dosage
+    const found = (medicines as any[]).find(
+      (m) => (m.trade_name || "").toLowerCase() === name.toLowerCase()
+    );
+
+    mutation.mutate({
       user_id: userId,
       name,
       frequency: parseInt(frequency),
       timing,
-      start_date: new Date().toISOString(),
+      start_date: editingMedicine?.start_date || new Date().toISOString(),
       duration_days: parseInt(durationDays),
-      generic_name: found?.generic_with_strength || "",
-      dosage_form: found?.dosage_form || "",
+      generic_name:
+        found?.generic_with_strength ||
+        editingMedicine?.generic_name ||
+        "",
+      dosage_form:
+        found?.dosage_form ||
+        editingMedicine?.dosage_form ||
+        "",
     });
   };
 
@@ -111,47 +182,66 @@ export function AddMedicineDialog({ userId, open, onOpenChange }: AddMedicineDia
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>Add New Medicine</DialogTitle>
+          <DialogTitle>
+            {isEditing ? "Edit Medicine" : "Add New Medicine"}
+          </DialogTitle>
           <DialogDescription>
-            Fill in the details for your new medication
+            {isEditing
+              ? "Update the details of your medication"
+              : "Fill in the details for your new medication"}
           </DialogDescription>
         </DialogHeader>
+
         <form onSubmit={handleSubmit} className="space-y-4">
-          <div className="space-y-2 relative">
-            <Label htmlFor="medicine-name">Medicine Name</Label>
-            <Input
-              id="medicine-name"
-              placeholder="Start typing trade name or company..."
-              value={name}
-              onChange={(e) => {
-                setName(e.target.value);
-                setShowSuggestions(true);
-              }}
-              onFocus={() => setShowSuggestions(true)}
-              required
-              autoComplete="off"
-            />
-            {showSuggestions && suggestions.length > 0 && (
-              <div className="absolute z-50 w-full mt-1 bg-popover border border-border rounded-md shadow-lg max-h-60 overflow-auto">
-                {suggestions.map((med, idx) => (
-                  <button
-                    key={idx}
-                    type="button"
-                    onClick={() => handleSelectMedicine(med)}
-                    className="w-full px-3 py-2 text-left hover:bg-accent flex items-center justify-between gap-2 transition-colors"
-                  >
-                    <div className="flex-1">
-                      <div className="text-sm font-medium">{med.trade_name}</div>
-                      <div className="text-xs text-muted-foreground">
-                        {med.company ? med.company : med.generic_with_strength}
-                        {med.dosage_form ? ` — ${med.dosage_form}` : ""}
-                      </div>
-                    </div>
-                  </button>
-                ))}
-              </div>
-            )}
+          {/* Medicine Name – Read-only when editing */}
+<div className="space-y-2 relative">
+  <Label htmlFor="medicine-name">Medicine Name</Label>
+
+  {isEditing ? (
+    /* READ-ONLY VIEW when editing */
+    <div className="flex items-center h-10 px-3 py-2 rounded-md border border-input bg-background text-sm">
+      {name}
+    </div>
+  ) : (
+    /* EDITABLE INPUT when adding */
+    <Input
+      id="medicine-name"
+      placeholder="Start typing trade name or company..."
+      value={name}
+      onChange={(e) => {
+        setName(e.target.value);
+        setShowSuggestions(true);
+      }}
+      onFocus={() => setShowSuggestions(true)}
+      required
+      autoComplete="off"
+    />
+  )}
+
+  {/* Suggestions – only show when adding (not editing) */}
+  {!isEditing && showSuggestions && suggestions.length > 0 && (
+    <div className="absolute z-50 w-full mt-1 bg-popover border border-border rounded-md shadow-lg max-h-60 overflow-auto">
+      {suggestions.map((med, idx) => (
+        <button
+          key={idx}
+          type="button"
+          onClick={() => handleSelectMedicine(med)}
+          className="w-full px-3 py-2 text-left hover:bg-accent flex items-center justify-between gap-2 transition-colors"
+        >
+          <div className="flex-1">
+            <div className="text-sm font-medium">{med.trade_name}</div>
+            <div className="text-xs text-muted-foreground">
+              {med.company
+                ? med.company
+                : med.generic_with_strength}
+              {med.dosage_form ? ` — ${med.dosage_form}` : ""}
+            </div>
           </div>
+        </button>
+      ))}
+    </div>
+  )}
+</div>
 
           <div className="space-y-2">
             <Label htmlFor="frequency">How many times per day?</Label>
@@ -206,13 +296,26 @@ export function AddMedicineDialog({ userId, open, onOpenChange }: AddMedicineDia
             <Button
               type="button"
               variant="outline"
-              onClick={() => onOpenChange(false)}
+              onClick={() => {
+                onOpenChange(false);
+                onRequestEdit?.(null);
+              }}
               className="flex-1"
             >
               Cancel
             </Button>
-            <Button type="submit" className="flex-1" disabled={addMedicine.isPending}>
-              {addMedicine.isPending ? "Adding..." : "Add Medicine"}
+            <Button
+              type="submit"
+              className="flex-1"
+              disabled={mutation.isPending}
+            >
+              {mutation.isPending
+                ? isEditing
+                  ? "Updating..."
+                  : "Adding..."
+                : isEditing
+                ? "Update Medicine"
+                : "Add Medicine"}
             </Button>
           </div>
         </form>

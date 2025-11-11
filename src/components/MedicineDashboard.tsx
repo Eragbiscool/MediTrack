@@ -18,19 +18,32 @@ interface MedicineDashboardProps {
 export function MedicineDashboard({ userId, userName, onLogout }: MedicineDashboardProps) {
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [editingMedicine, setEditingMedicine] = useState<Medicine | null>(null);
+
   const { data: medicines } = useQuery({
     queryKey: ["medicines", userId],
-    queryFn: async () => {
-      return await getMedicinesForUserLocal(userId);
-    },
+    queryFn: async () => await getMedicinesForUserLocal(userId),
   });
 
-  // Automatically create medicine logs for today
   useMedicineScheduler(userId, medicines || []);
+
+  // ---- EDIT HANDLER (called from MedicineList) ----
+  const handleEdit = (med: Medicine) => {
+    setEditingMedicine(med);      // <-- full object
+    setShowAddDialog(true);       // open dialog in edit mode
+  };
+
+  // ---- CLOSE HANDLER (reset everything) ----
+  const handleDialogClose = (open: boolean) => {
+    setShowAddDialog(open);
+    if (!open) {
+      setEditingMedicine(null);   // <-- clear edit state
+    }
+  };
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-background via-secondary/20 to-background">
       <div className="container mx-auto p-4 max-w-6xl">
+
         {/* Header */}
         <div className="flex items-center justify-between mb-6 pt-4">
           <div className="flex items-center gap-3">
@@ -49,10 +62,10 @@ export function MedicineDashboard({ userId, userName, onLogout }: MedicineDashbo
           </Button>
         </div>
 
-        {/* Today's Medicines Section */}
+        {/* Today's Medicines */}
         <TodaysMedicines userId={userId} medicines={medicines || []} />
 
-        {/* All Medicines Section */}
+        {/* All Medicines */}
         <Card className="shadow-[var(--shadow-card)] mb-6">
           <CardHeader>
             <div className="flex items-center justify-between">
@@ -67,26 +80,22 @@ export function MedicineDashboard({ userId, userName, onLogout }: MedicineDashbo
             </div>
           </CardHeader>
           <CardContent>
-            <MedicineList userId={userId} medicines={medicines || []} onEdit={(med) => { setEditingMedicine(med); setShowAddDialog(true); }} />
+            <MedicineList
+              userId={userId}
+              medicines={medicines || []}
+              onEdit={handleEdit}               // <-- pass the handler
+            />
           </CardContent>
         </Card>
 
-        {/* Add Medicine Dialog */}
+        {/* Add / Edit Dialog */}
         <AddMedicineDialog
           userId={userId}
           open={showAddDialog}
+          onOpenChange={handleDialogClose}
           editingMedicine={editingMedicine}
-          onRequestEdit={(id) => {
-            const med = medicines?.find((m) => m.id === id);
-            if (med) {
-              setEditingMedicine(med);
-              setShowAddDialog(true);
-            }
-          }}
-          onOpenChange={(open) => {
-            setShowAddDialog(open);
-            if (!open) setEditingMedicine(null); // Reset on close
-          }}
+          // onRequestEdit is **optional** – we don’t need it here
+          // (dialog clears edit mode itself on success)
         />
       </div>
     </div>

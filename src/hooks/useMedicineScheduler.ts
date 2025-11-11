@@ -1,109 +1,97 @@
+// hooks/useMedicineScheduler.ts
 import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { getMedicinesForUserLocal, createMedicineLogLocal } from "@/data/db";
+import { getMedicineLogsForDateLocal, createMedicineLogLocal } from "@/data/db";
 
 interface Medicine {
   id: string;
   frequency: number;
   start_date: string;
   duration_days: number;
+  is_active: boolean;
+  timing: "before_meal" | "after_meal" | "anytime";
 }
 
-// Helper: convert an ISO timestamp or date string to a Date at midnight (local)
-function dateOnlyFromISO(iso: string) {
-  // If iso already looks like YYYY-MM-DD, return that date at midnight
-  const datePart = iso.split("T")[0];
-  const d = new Date(datePart + "T00:00:00");
-  // normalize to remove time component (UTC/local differences handled by using the date part)
+// Helper: get date-only (midnight) from ISO string
+const dateOnly = (iso: string) => {
+  const d = new Date(iso.split("T")[0] + "T00:00:00");
   d.setHours(0, 0, 0, 0);
   return d;
-}
+};
 
-// This hook automatically creates medicine logs for the current day (local DB)
 export function useMedicineScheduler(userId: string, medicines: Medicine[]) {
   const queryClient = useQueryClient();
 
   useEffect(() => {
-    if (!medicines || medicines.length === 0) return;
+    if (!userId || medicines.length === 0) return;
+
+    const todayISO = new Date().toISOString().split("T")[0];
 
     const createTodaysLogs = async () => {
-      const todayISO = new Date().toISOString().split("T")[0]; // "YYYY-MM-DD"
+      const createPromises: Promise<any>[] = [];
 
-      for (const medicine of medicines) {
-        // Convert start_date to date-only (midnight) for correct inclusive comparison
-        const startDateOnly = dateOnlyFromISO(medicine.start_date);
-        const endDateOnly = new Date(startDateOnly);
-        endDateOnly.setDate(endDateOnly.getDate() + medicine.duration_days);
+      for (const med of medicines) {
+        if (!med.is_active) continue;
 
-        // Create a date object for today's date at midnight
-        const todayDate = dateOnlyFromISO(todayISO);
+        const start = dateOnly(med.start_date);
+        const end = new Date(start);
+        end.setDate(end.getDate() + med.duration_days);
+        const today = dateOnly(todayISO);
 
-        // If today is before start date or after end date, skip
-        if (todayDate < startDateOnly || todayDate > endDateOnly) {
-          continue;
+        if (today < start || today > end) continue;
+
+        // Fetch existing logs for this medicine + today
+        const existing = await getMedicineLogsForDateLocal(userId, todayISO);
+        const existingTimes = new Set(
+          existing
+            .filter((l) => l.medicine_id === med.id)
+            .map((l) => l.scheduled_time)
+        );
+
+        // Decide dose times based on frequency + timing
+        const times: string[] = [];
+
+        if (med.frequency <= 3 && med.timing !== "anytime") {
+          // Fixed times: 8 AM, 2 PM, 8 PM
+          const fixed = ["08:00:00", "14:00:00", "20:00:00"];
+          times.push(...fixed.slice(0, med.frequency));
+        } else {
+          // Evenly spaced across 24h, starting at 8 AM
+          const interval = 24 / med.frequency;
+          let hour = 8; // start at 8 AM
+
+          for (let i = 0; i < med.frequency; i++) {
+            const h = Math.floor(hour);
+            const m = Math.round((hour - h) * 60);
+            const time = `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}:00`;
+            times.push(time);
+            hour += interval;
+          }
         }
 
-        // Check if logs already exist for today in local DB
-        const existingLogs = await (async () => {
-          const logs = await (await import("@/data/db")).getMedicineLogsForDateLocal(userId, todayISO);
-          return logs.filter((l: any) => l.medicine_id === medicine.id);
-        })();
-
-        if (existingLogs && existingLogs.length > 0) {
-          continue; // Logs already created for today
-        }
-
-        // Create logs based on frequency
-        const logsToCreate: Array<{
-          medicine_id: string;
-          scheduled_date: string;
-          scheduled_time: string;
-          status: string;
-        }> = [];
-        const hoursPerDay = 24;
-        const interval = Math.max(1, Math.floor(hoursPerDay / Math.max(1, medicine.frequency)));
-
-        for (let i = 0; i < medicine.frequency; i++) {
-          // Spread scheduled times across the day starting at 8 AM
-          const hour = Math.min(8 + i * interval, 22); // clamp between 8 and 22
-          const scheduledTime = `${hour.toString().padStart(2, "0")}:00:00`;
-
-          logsToCreate.push({
-            medicine_id: medicine.id,
-            scheduled_date: todayISO,
-            scheduled_time: scheduledTime,
-            status: "pending",
-          });
-        }
-
-        // Insert logs
-        for (const lg of logsToCreate) {
-          await createMedicineLogLocal(lg as any);
+        // Create missing logs
+        for (const time of times) {
+          if (!existingTimes.has(time)) {
+            createPromises.push(
+              createMedicineLogLocal({
+                medicine_id: med.id,
+                scheduled_date: todayISO,
+                scheduled_time: time,
+                status: "pending",
+              })
+            );
+          }
         }
       }
 
-      // Refresh the logs query
-      queryClient.invalidateQueries({ queryKey: ["medicine-logs", userId, todayISO] });
+      if (createPromises.length > 0) {
+        await Promise.all(createPromises);
+        queryClient.invalidateQueries({
+          queryKey: ["medicine-logs", userId, todayISO],
+        });
+      }
     };
 
     createTodaysLogs();
-
-    // Run once per day at midnight
-    const now = new Date();
-    const tomorrow = new Date(now);
-    tomorrow.setDate(tomorrow.getDate() + 1);
-    tomorrow.setHours(0, 0, 0, 0);
-    const timeUntilMidnight = tomorrow.getTime() - now.getTime();
-
-    const midnightTimer = setTimeout(() => {
-      createTodaysLogs();
-
-      // Set up daily interval
-      const dailyInterval = setInterval(createTodaysLogs, 24 * 60 * 60 * 1000);
-
-      return () => clearInterval(dailyInterval);
-    }, timeUntilMidnight);
-
-    return () => clearTimeout(midnightTimer);
   }, [userId, medicines, queryClient]);
 }
