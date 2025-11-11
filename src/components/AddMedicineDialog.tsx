@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Dialog,
   DialogContent,
@@ -11,11 +11,16 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { toast } from "sonner";
 import medicines from "@/data/medicines.json";
-import { createMedicineLocal, updateMedicineLocal } from "@/data/db";
-import { useQuery } from "@tanstack/react-query";
-import { getMedicinesForUserLocal } from "@/data/db";
+import {
+  createMedicineLocal,
+  updateMedicineLocal,
+  deleteMedicineLogsForMedicine,
+  getMedicinesForUserLocal,
+} from "@/data/db";
 
 interface Medicine {
   id: string;
@@ -25,8 +30,9 @@ interface Medicine {
   timing: "before_meal" | "after_meal" | "anytime";
   start_date: string;
   duration_days: number;
-  generic_name?: string;
-  dosage_form?: string;
+  custom_dose_times?: string[];
+  dose_interval_hours?: number;
+  is_active: boolean;
 }
 
 interface AddMedicineDialogProps {
@@ -36,6 +42,12 @@ interface AddMedicineDialogProps {
   editingMedicine?: Medicine | null;
   onRequestEdit?: (medicineId: string | null) => void;
 }
+
+const TIME_OPTIONS = Array.from({ length: 96 }, (_, i) => {
+  const hour = Math.floor(i / 4);
+  const minute = (i % 4) * 15;
+  return `${hour.toString().padStart(2, "0")}:${minute.toString().padStart(2, "0")}:00`;
+});
 
 export function AddMedicineDialog({
   userId,
@@ -49,32 +61,54 @@ export function AddMedicineDialog({
   const [timing, setTiming] = useState<"before_meal" | "after_meal" | "anytime">("after_meal");
   const [durationDays, setDurationDays] = useState("7");
   const [showSuggestions, setShowSuggestions] = useState(false);
-  const queryClient = useQueryClient();
+  const [customTimes, setCustomTimes] = useState(false);
+  const [doseInterval, setDoseInterval] = useState<string>("");
+  const [customDoseTimes, setCustomDoseTimes] = useState<string[]>([]);
 
+  const queryClient = useQueryClient();
   const isEditing = !!editingMedicine?.id;
 
-  // Pre-fill form when editing
-  useEffect(() => {
-    if (editingMedicine) {
-      setName(editingMedicine.name || "");
-      setFrequency(String(editingMedicine.frequency || 2));
-      setTiming(editingMedicine.timing);
-      setDurationDays(String(editingMedicine.duration_days || 7));
-    } else {
-      setName("");
-      setFrequency("2");
-      setTiming("after_meal");
-      setDurationDays("7");
-    }
-    setShowSuggestions(false);
-  }, [editingMedicine]);
+  const { data: existingMedicines } = useQuery({
+    queryKey: ["medicines", userId],
+    queryFn: () => getMedicinesForUserLocal(userId),
+  });
 
-  // Suggestions based on input
+  /* ---------- Reset form on open ---------- */
+  useEffect(() => {
+    if (open) {
+      if (editingMedicine) {
+        const freq = editingMedicine.frequency;
+        setName(editingMedicine.name);
+        setFrequency(String(freq));
+        setTiming(editingMedicine.timing);
+        setDurationDays(String(editingMedicine.duration_days));
+        setCustomTimes(!!editingMedicine.custom_dose_times?.length);
+        setDoseInterval(String(editingMedicine.dose_interval_hours || ""));
+
+        // Trim or pad customDoseTimes to match frequency
+        const doses = editingMedicine.custom_dose_times || [];
+        const trimmed = doses.slice(0, freq);
+        while (trimmed.length < freq) trimmed.push("");
+        setCustomDoseTimes(trimmed);
+      } else {
+        setName("");
+        setFrequency("2");
+        setTiming("after_meal");
+        setDurationDays("7");
+        setCustomTimes(false);
+        setDoseInterval("");
+        setCustomDoseTimes([]);
+      }
+      setShowSuggestions(false);
+    }
+  }, [open, editingMedicine]);
+
+  /* ---------- Medicine name suggestions ---------- */
   const suggestions = useMemo(() => {
     if (!name) return [];
     const s = name.toLowerCase().trim();
     return (medicines as any[])
-      .filter((m) => {
+      .filter((m: any) => {
         const trade = (m.trade_name || "").toLowerCase();
         const company = (m.company || "").toLowerCase();
         return trade.includes(s) || company.includes(s);
@@ -82,32 +116,32 @@ export function AddMedicineDialog({
       .slice(0, 8);
   }, [name]);
 
-  // Fetch existing medicines to check duplicates
-  const { data: existingMedicines } = useQuery({
-    queryKey: ["medicines", userId],
-    queryFn: () => getMedicinesForUserLocal(userId),
-  });
-
-  // Unified mutation: Add or Update
+  /* ---------- Save / Update mutation ---------- */
   const mutation = useMutation({
-    mutationFn: async (medicine: any) => {
+    mutationFn: async (payload: any) => {
+      const newFreq = parseInt(frequency);
+
+      // Delete old logs if frequency or custom times changed
       if (isEditing) {
-        return await updateMedicineLocal({
-          ...medicine,
-          id: editingMedicine.id,
-        });
+        const oldFreq = editingMedicine!.frequency;
+        const oldCustom = editingMedicine!.custom_dose_times?.length || 0;
+        if (oldFreq !== newFreq || oldCustom !== (customTimes ? newFreq : 0)) {
+          await deleteMedicineLogsForMedicine(editingMedicine!.id);
+          const todayISO = new Date().toISOString().split("T")[0];
+          queryClient.invalidateQueries({ queryKey: ["medicine_logs", userId, todayISO] });
+        }
+        return await updateMedicineLocal({ ...payload, id: editingMedicine!.id });
       }
-      return await createMedicineLocal(medicine);
+
+      return await createMedicineLocal(payload);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["medicines", userId] });
       toast.success(isEditing ? "Medicine updated!" : "Medicine added!");
       onOpenChange(false);
-      onRequestEdit?.(null); // Clear edit mode
+      onRequestEdit?.(null);
     },
-    onError: () => {
-      toast.error(`Failed to ${isEditing ? "update" : "add"} medicine`);
-    },
+    onError: () => toast.error(`Failed to ${isEditing ? "update" : "add"} medicine`),
   });
 
   const handleSelectMedicine = (med: any) => {
@@ -122,131 +156,140 @@ export function AddMedicineDialog({
       return;
     }
 
-    const now = new Date();
+    const freq = parseInt(frequency);
 
-    // Check for duplicate active medicine (skip self when editing)
-    const duplicate = existingMedicines?.find((med: any) => {
-      if (isEditing && med.id === editingMedicine.id) return false;
+    // ---- Custom dose validation ----
+    if (customTimes) {
+      const trimmedTimes = customDoseTimes.slice(0, freq);
+      setCustomDoseTimes(trimmedTimes);
 
-      const medStartDate = new Date(med.start_date);
-      const medEndDate = new Date(medStartDate);
-      medEndDate.setDate(medEndDate.getDate() + (med.duration_days || 0));
+      const filled = trimmedTimes.filter(Boolean).length;
+      if (filled > 0 && filled !== freq) {
+        toast.error(`You selected ${filled} times but frequency is ${freq}. Select exactly ${freq} times or clear them.`);
+        return;
+      }
+    }
 
-      return (
-        med.name.toLowerCase() === name.toLowerCase() &&
-        medEndDate >= now
-      );
-    });
-
-    if (duplicate) {
-      const medEndDate = new Date(new Date(duplicate.start_date));
-      medEndDate.setDate(medEndDate.getDate() + (duplicate.duration_days || 0));
-
-      const formattedDate = medEndDate.toLocaleDateString(undefined, {
-        weekday: "short",
-        month: "short",
-        day: "numeric",
-        year: "numeric",
-      });
-
-      toast.error(
-        `"${name}" is already active.\nYou can add it again after ${formattedDate}.`
-      );
+    if (!customTimes && freq > 3 && !doseInterval) {
+      toast.error("Please select an interval");
       return;
     }
 
-    // Try to enrich with generic/dosage
+    // ---- Duplicate check ----
+    const now = new Date();
+    const duplicate = existingMedicines?.find((m: any) => {
+      if (isEditing && m.id === editingMedicine?.id) return false;
+      const end = new Date(m.start_date);
+      end.setDate(end.getDate() + (m.duration_days || 0));
+      return m.name.toLowerCase() === name.toLowerCase() && end >= now;
+    });
+    if (duplicate) {
+      toast.error(`"${name}" is already active.`);
+      return;
+    }
+
     const found = (medicines as any[]).find(
-      (m) => (m.trade_name || "").toLowerCase() === name.toLowerCase()
+      (m: any) => (m.trade_name || "").toLowerCase() === name.toLowerCase()
     );
 
-    mutation.mutate({
+    // ---- Build payload ----
+    const payload: any = {
       user_id: userId,
       name,
-      frequency: parseInt(frequency),
+      frequency: freq,
       timing,
       start_date: editingMedicine?.start_date || new Date().toISOString(),
       duration_days: parseInt(durationDays),
-      generic_name:
-        found?.generic_with_strength ||
-        editingMedicine?.generic_name ||
-        "",
-      dosage_form:
-        found?.dosage_form ||
-        editingMedicine?.dosage_form ||
-        "",
-    });
+      generic_name: found?.generic_with_strength || editingMedicine?.generic_name || "",
+      dosage_form: found?.dosage_form || editingMedicine?.dosage_form || "",
+    };
+
+    if (customTimes) payload.custom_dose_times = customDoseTimes.slice(0, freq);
+    if (!customTimes && freq > 3) payload.dose_interval_hours = parseInt(doseInterval);
+
+    mutation.mutate(payload);
+  };
+
+  const freq = parseInt(frequency) || 0;
+
+  const intervalOptions = useMemo(() => {
+    if (freq <= 3 || customTimes) return [];
+    const windowHours = 15;
+    const max = Math.floor(windowHours / freq);
+    return Array.from({ length: max }, (_, i) => i + 1);
+  }, [freq, customTimes]);
+
+  useEffect(() => {
+    if (intervalOptions.length && !doseInterval) {
+      setDoseInterval(String(intervalOptions[0]));
+    } else if (!intervalOptions.length) {
+      setDoseInterval("");
+    }
+  }, [intervalOptions, doseInterval]);
+
+  const getAvailableTimes = (idx: number) => {
+    if (!customTimes || idx === 0) return TIME_OPTIONS;
+    const prev = customDoseTimes[idx - 1];
+    return prev ? TIME_OPTIONS.filter((t) => t > prev) : TIME_OPTIONS;
   };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>
-            {isEditing ? "Edit Medicine" : "Add New Medicine"}
-          </DialogTitle>
+          <DialogTitle>{isEditing ? "Edit Medicine" : "Add New Medicine"}</DialogTitle>
           <DialogDescription>
-            {isEditing
-              ? "Update the details of your medication"
-              : "Fill in the details for your new medication"}
+            {isEditing ? "Update medication details" : "Fill in the details"}
           </DialogDescription>
         </DialogHeader>
 
         <form onSubmit={handleSubmit} className="space-y-4">
-          {/* Medicine Name – Read-only when editing */}
-<div className="space-y-2 relative">
-  <Label htmlFor="medicine-name">Medicine Name</Label>
-
-  {isEditing ? (
-    /* READ-ONLY VIEW when editing */
-    <div className="flex items-center h-10 px-3 py-2 rounded-md border border-input bg-background text-sm">
-      {name}
-    </div>
-  ) : (
-    /* EDITABLE INPUT when adding */
-    <Input
-      id="medicine-name"
-      placeholder="Start typing trade name or company..."
-      value={name}
-      onChange={(e) => {
-        setName(e.target.value);
-        setShowSuggestions(true);
-      }}
-      onFocus={() => setShowSuggestions(true)}
-      required
-      autoComplete="off"
-    />
-  )}
-
-  {/* Suggestions – only show when adding (not editing) */}
-  {!isEditing && showSuggestions && suggestions.length > 0 && (
-    <div className="absolute z-50 w-full mt-1 bg-popover border border-border rounded-md shadow-lg max-h-60 overflow-auto">
-      {suggestions.map((med, idx) => (
-        <button
-          key={idx}
-          type="button"
-          onClick={() => handleSelectMedicine(med)}
-          className="w-full px-3 py-2 text-left hover:bg-accent flex items-center justify-between gap-2 transition-colors"
-        >
-          <div className="flex-1">
-            <div className="text-sm font-medium">{med.trade_name}</div>
-            <div className="text-xs text-muted-foreground">
-              {med.company
-                ? med.company
-                : med.generic_with_strength}
-              {med.dosage_form ? ` — ${med.dosage_form}` : ""}
-            </div>
+          {/* Medicine name */}
+          <div className="space-y-2 relative">
+            <Label htmlFor="medicine-name">Medicine Name</Label>
+            {isEditing ? (
+              <div className="h-10 px-3 py-2 rounded-md border bg-muted/50 flex items-center">
+                {name}
+              </div>
+            ) : (
+              <Input
+                id="medicine-name"
+                placeholder="Type trade name..."
+                value={name}
+                onChange={(e) => {
+                  setName(e.target.value);
+                  setShowSuggestions(true);
+                }}
+                onFocus={() => setShowSuggestions(true)}
+                required
+                autoComplete="off"
+              />
+            )}
+            {!isEditing && showSuggestions && suggestions.length > 0 && (
+              <div className="absolute z-50 w-full mt-1 bg-popover border rounded-md shadow-lg max-h-60 overflow-auto">
+                {suggestions.map((med: any, idx: number) => (
+                  <button
+                    key={idx}
+                    type="button"
+                    onClick={() => handleSelectMedicine(med)}
+                    className="w-full px-3 py-2 text-left hover:bg-accent flex justify-between"
+                  >
+                    <div>
+                      <div className="text-sm font-medium">{med.trade_name}</div>
+                      <div className="text-xs text-muted-foreground">
+                        {med.company || med.generic_with_strength}
+                      </div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
-        </button>
-      ))}
-    </div>
-  )}
-</div>
 
+          {/* Frequency */}
           <div className="space-y-2">
-            <Label htmlFor="frequency">How many times per day?</Label>
+            <Label>How many times per day?</Label>
             <Input
-              id="frequency"
               type="number"
               min="1"
               max="8"
@@ -256,9 +299,10 @@ export function AddMedicineDialog({
             />
           </div>
 
+          {/* Timing */}
           <div className="space-y-3">
             <Label>When to take?</Label>
-            <RadioGroup value={timing} onValueChange={(value: any) => setTiming(value)}>
+            <RadioGroup value={timing} onValueChange={(v: any) => setTiming(v)}>
               <div className="flex items-center space-x-2">
                 <RadioGroupItem value="before_meal" id="before" />
                 <Label htmlFor="before" className="font-normal cursor-pointer">
@@ -280,10 +324,83 @@ export function AddMedicineDialog({
             </RadioGroup>
           </div>
 
+          {/* Custom‑times toggle */}
+          {freq > 0 && (
+            <div className="flex items-center justify-between">
+              <Label htmlFor="custom-times" className="text-sm">
+                Set custom dose times?
+              </Label>
+              <Switch
+                id="custom-times"
+                checked={customTimes}
+                onCheckedChange={(checked) => {
+                  setCustomTimes(checked);
+                  if (!checked) setCustomDoseTimes([]);
+                }}
+              />
+            </div>
+          )}
+
+          {/* Interval dropdown */}
+          {!customTimes && freq > 3 && intervalOptions.length > 0 && (
+            <div className="space-y-2">
+              <Label>Interval between doses</Label>
+              <Select value={doseInterval} onValueChange={setDoseInterval}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {intervalOptions.map((h) => (
+                    <SelectItem key={h} value={String(h)}>
+                      {h} hour{h > 1 ? "s" : ""}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
+
+          {/* Custom dose times */}
+          {customTimes && freq > 0 && (
+            <div className="space-y-3">
+              <Label>Dose Times</Label>
+              {Array.from({ length: freq }, (_, i) => {
+                const opts = getAvailableTimes(i);
+                return (
+                  <div key={i} className="flex items-center gap-2">
+                    <span className="text-sm w-24">Dose {i + 1}:</span>
+                    <Select
+                      value={customDoseTimes[i] || ""}
+                      onValueChange={(v) => {
+                        const copy = [...customDoseTimes];
+                        copy[i] = v;
+                        setCustomDoseTimes(copy);
+                      }}
+                    >
+                      <SelectTrigger className="flex-1">
+                        <SelectValue placeholder="Select time" />
+                      </SelectTrigger>
+                      <SelectContent className="max-h-60">
+                        {opts.map((t) => (
+                          <SelectItem key={t} value={t}>
+                            {new Date(`2025-01-01T${t}`).toLocaleTimeString([], {
+                              hour: "numeric",
+                              minute: "2-digit",
+                            })}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Duration */}
           <div className="space-y-2">
-            <Label htmlFor="duration">Duration (days)</Label>
+            <Label>Duration (days)</Label>
             <Input
-              id="duration"
               type="number"
               min="1"
               value={durationDays}
@@ -292,30 +409,18 @@ export function AddMedicineDialog({
             />
           </div>
 
+          {/* Buttons */}
           <div className="flex gap-3 pt-2">
             <Button
               type="button"
               variant="outline"
-              onClick={() => {
-                onOpenChange(false);
-                onRequestEdit?.(null);
-              }}
+              onClick={() => onOpenChange(false)}
               className="flex-1"
             >
               Cancel
             </Button>
-            <Button
-              type="submit"
-              className="flex-1"
-              disabled={mutation.isPending}
-            >
-              {mutation.isPending
-                ? isEditing
-                  ? "Updating..."
-                  : "Adding..."
-                : isEditing
-                ? "Update Medicine"
-                : "Add Medicine"}
+            <Button type="submit" className="flex-1" disabled={mutation.isPending}>
+              {mutation.isPending ? "Saving…" : isEditing ? "Update" : "Add"}
             </Button>
           </div>
         </form>

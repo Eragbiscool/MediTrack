@@ -175,17 +175,17 @@ export function TodaysMedicines({ userId, medicines }: TodaysMedicinesProps) {
                     <p className="font-medium text-sm">{medName}</p>
                     <p className="text-xs text-muted-foreground">
                       {relativeHint || (
-                        isTaken ? (
-                          <span className={offSchedule ? "text-yellow-700" : "text-green-700"}>
-                            {offSchedule ? "Taken off-schedule" : "Taken"} at {formatTime12(log.taken_at!)}
-                          </span>
-                        ) : (
-                          <>
-                            <Clock className="w-3 h-3 inline mr-1" />
-                            {log.scheduled_time.substring(0, 5)} ({getTimingLabel(med?.timing || "anytime")})
-                          </>
-                        )
-                      )}
+                      isTaken ? (
+                        <span className={offSchedule ? "text-yellow-700" : "text-green-700"}>
+                          {offSchedule ? "Taken off-schedule" : "Taken"} at {formatTime12(log.taken_at!)}
+                        </span>
+                      ) : (
+                        <>
+                          <Clock className="w-3 h-3 inline mr-1" />
+                          {log.scheduled_time.substring(0, 5)} ({getTimingLabel(med?.timing || "anytime")})
+                        </>
+                      )
+                    )}
                     </p>
                   </div>
                 </div>

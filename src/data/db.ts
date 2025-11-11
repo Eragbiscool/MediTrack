@@ -11,14 +11,14 @@ export interface User {
 export interface Medicine {
   id: string;
   user_id: string;
-  name: string; // trade name
-  generic_name?: string;
-  dosage_form?: string;
+  name: string;
   frequency: number;
-  timing: string;
-  start_date: string; // ISO date
+  timing: "before_meal" | "after_meal" | "anytime";
+  start_date: string;
   duration_days: number;
   is_active: boolean;
+  custom_dose_times?: string[];     // e.g. ["01:00:00", "13:00:00"]
+  dose_interval_hours?: number;     // e.g. 12
   created_at: string;
 }
 
@@ -150,4 +150,31 @@ export async function getMedicineLogsForDateLocal(userId: string, dateISO: strin
     .equals(dateISO)
     .filter((l) => ids.includes(l.medicine_id))
     .toArray();
+}
+
+
+// export async function deleteMedicineLogsForMedicine(medicineId: string) {
+//   const db = await getDB();               // your IndexedDB init function
+//   const tx = db.transaction("medicine_logs", "readwrite");
+//   const store = tx.objectStore("medicine_logs");
+//   const index = store.index("medicine_id");
+//   const range = IDBKeyRange.only(medicineId);
+
+//   const cursorReq = index.openCursor(range);
+//   cursorReq.onsuccess = () => {
+//     const cursor = cursorReq.result;
+//     if (cursor) {
+//       cursor.delete();
+//       cursor.continue();
+//     }
+//   };
+//   await tx.done;
+// }
+
+export async function deleteMedicineLogsForMedicine(medicineId: string) {
+  // Using Dexie query to delete all matching logs
+  return db.medicine_logs
+    .where("medicine_id")
+    .equals(medicineId)
+    .delete();
 }
