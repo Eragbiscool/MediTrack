@@ -7,7 +7,11 @@ import { AddMedicineDialog } from "./AddMedicineDialog";
 import { TodaysMedicines } from "./TodaysMedicines";
 import { MedicineList } from "./MedicineList";
 import { useMedicineScheduler } from "@/hooks/useMedicineScheduler";
-import { getMedicinesForUserLocal } from "@/data/db";
+import {
+  getMedicinesForUserLocal,
+  deleteMedicineLogsForMedicine,
+  removeUserLocal,
+} from "@/data/db";
 
 interface MedicineDashboardProps {
   userId: string;
@@ -26,17 +30,39 @@ export function MedicineDashboard({ userId, userName, onLogout }: MedicineDashbo
 
   useMedicineScheduler(userId, medicines || []);
 
-  // ---- EDIT HANDLER (called from MedicineList) ----
+  // ---- EDIT HANDLER ----
   const handleEdit = (med: Medicine) => {
-    setEditingMedicine(med);      // <-- full object
-    setShowAddDialog(true);       // open dialog in edit mode
+    setEditingMedicine(med);
+    setShowAddDialog(true);
   };
 
-  // ---- CLOSE HANDLER (reset everything) ----
+  // ---- DIALOG CLOSE HANDLER ----
   const handleDialogClose = (open: boolean) => {
     setShowAddDialog(open);
     if (!open) {
-      setEditingMedicine(null);   // <-- clear edit state
+      setEditingMedicine(null);
+    }
+  };
+
+  // ---- REMOVE ACCOUNT HANDLER ----
+  const handleRemoveAccount = async () => {
+    const confirmed = window.confirm(
+      "You won't get the data back! Are you sure you want to remove your account?"
+    );
+    if (!confirmed) return;
+
+    try {
+      if (medicines) {
+        for (const med of medicines) {
+          await deleteMedicineLogsForMedicine(med.id);
+        }
+      }
+      await removeUserLocal(userId);
+      alert("Account removed successfully!");
+      onLogout();
+    } catch (err) {
+      console.error(err);
+      alert("Failed to remove account");
     }
   };
 
@@ -44,28 +70,36 @@ export function MedicineDashboard({ userId, userName, onLogout }: MedicineDashbo
     <div className="min-h-screen bg-gradient-to-br from-background via-secondary/20 to-background">
       <div className="container mx-auto p-4 max-w-6xl">
 
-        {/* Header */}
-        <div className="flex items-center justify-between mb-6 pt-4">
-          <div className="flex items-center gap-3">
-            <div className="w-12 h-12 bg-gradient-to-br from-primary to-accent rounded-xl flex items-center justify-center">
+        {/* ===== HEADER ===== */}
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between mb-6 pt-4 gap-4 sm:gap-0">
+          {/* Left: Welcome */}
+          <div className="flex items-center gap-4">
+            <div className="w-12 h-12 bg-gradient-to-br from-primary to-accent rounded-xl flex items-center justify-center shadow-md">
               <Pill className="w-6 h-6 text-primary-foreground" />
             </div>
             <div>
-              <h1 className="text-2xl font-bold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent">
+              <h1 className="text-2xl font-extrabold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent">
                 Welcome, {userName}
               </h1>
-              <p className="text-sm text-muted-foreground">Manage your medications</p>
+              <p className="text-sm text-muted-foreground">Manage your medications effortlessly</p>
             </div>
           </div>
-          <Button variant="ghost" size="icon" onClick={onLogout} title="Switch User">
-            <LogOut className="w-5 h-5" />
-          </Button>
+
+          {/* Right: Account Actions */}
+          <div className="flex gap-2 mt-2 sm:mt-0 flex-wrap sm:flex-nowrap">
+            <Button variant="destructive" size="sm" onClick={handleRemoveAccount}>
+              Remove Account
+            </Button>
+            <Button variant="ghost" size="icon" onClick={onLogout} title="Switch User">
+              <LogOut className="w-5 h-5" />
+            </Button>
+          </div>
         </div>
 
-        {/* Today's Medicines */}
+        {/* ===== TODAY'S MEDICINES ===== */}
         <TodaysMedicines userId={userId} medicines={medicines || []} />
 
-        {/* All Medicines */}
+        {/* ===== ALL MEDICINES ===== */}
         <Card className="shadow-[var(--shadow-card)] mb-6">
           <CardHeader>
             <div className="flex items-center justify-between">
@@ -83,19 +117,17 @@ export function MedicineDashboard({ userId, userName, onLogout }: MedicineDashbo
             <MedicineList
               userId={userId}
               medicines={medicines || []}
-              onEdit={handleEdit}               // <-- pass the handler
+              onEdit={handleEdit}
             />
           </CardContent>
         </Card>
 
-        {/* Add / Edit Dialog */}
+        {/* ===== ADD / EDIT MEDICINE DIALOG ===== */}
         <AddMedicineDialog
           userId={userId}
           open={showAddDialog}
           onOpenChange={handleDialogClose}
           editingMedicine={editingMedicine}
-          // onRequestEdit is **optional** – we don’t need it here
-          // (dialog clears edit mode itself on success)
         />
       </div>
     </div>

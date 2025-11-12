@@ -20,7 +20,9 @@ import {
   updateMedicineLocal,
   deleteMedicineLogsForMedicine,
   getMedicinesForUserLocal,
+  createMedicineLogsForMedicine,
 } from "@/data/db";
+import { scheduleDoseNotifications } from "@/utils/notifications";
 
 interface Medicine {
   id: string;
@@ -73,37 +75,37 @@ export function AddMedicineDialog({
     queryFn: () => getMedicinesForUserLocal(userId),
   });
 
-  /* ---------- Reset form on open ---------- */
+  // Reset form on open
   useEffect(() => {
-    if (open) {
-      if (editingMedicine) {
-        const freq = editingMedicine.frequency;
-        setName(editingMedicine.name);
-        setFrequency(String(freq));
-        setTiming(editingMedicine.timing);
-        setDurationDays(String(editingMedicine.duration_days));
-        setCustomTimes(!!editingMedicine.custom_dose_times?.length);
-        setDoseInterval(String(editingMedicine.dose_interval_hours || ""));
+    if (!open) return;
 
-        // Trim or pad customDoseTimes to match frequency
-        const doses = editingMedicine.custom_dose_times || [];
-        const trimmed = doses.slice(0, freq);
-        while (trimmed.length < freq) trimmed.push("");
-        setCustomDoseTimes(trimmed);
-      } else {
-        setName("");
-        setFrequency("2");
-        setTiming("after_meal");
-        setDurationDays("7");
-        setCustomTimes(false);
-        setDoseInterval("");
-        setCustomDoseTimes([]);
-      }
-      setShowSuggestions(false);
+    if (editingMedicine) {
+      const freq = editingMedicine.frequency;
+      setName(editingMedicine.name);
+      setFrequency(String(freq));
+      setTiming(editingMedicine.timing);
+      setDurationDays(String(editingMedicine.duration_days));
+      setCustomTimes(!!editingMedicine.custom_dose_times?.length);
+      setDoseInterval(String(editingMedicine.dose_interval_hours || ""));
+
+      const doses = editingMedicine.custom_dose_times || [];
+      const trimmed = doses.slice(0, freq);
+      while (trimmed.length < freq) trimmed.push("");
+      setCustomDoseTimes(trimmed);
+    } else {
+      setName("");
+      setFrequency("2");
+      setTiming("after_meal");
+      setDurationDays("7");
+      setCustomTimes(false);
+      setDoseInterval("");
+      setCustomDoseTimes([]);
     }
+
+    setShowSuggestions(false);
   }, [open, editingMedicine]);
 
-  /* ---------- Medicine name suggestions ---------- */
+  // Suggestions for medicine names
   const suggestions = useMemo(() => {
     if (!name) return [];
     const s = name.toLowerCase().trim();
@@ -116,24 +118,26 @@ export function AddMedicineDialog({
       .slice(0, 8);
   }, [name]);
 
-  /* ---------- Save / Update mutation ---------- */
+  // Mutation for add/update
   const mutation = useMutation({
     mutationFn: async (payload: any) => {
-      const newFreq = parseInt(frequency);
+      if (isEditing && editingMedicine) {
+        // Delete all future logs for this medicine (keep taken logs optional)
+        await deleteMedicineLogsForMedicine(editingMedicine.id, { keepTaken: true });
 
-      // Delete old logs if frequency or custom times changed
-      if (isEditing) {
-        const oldFreq = editingMedicine!.frequency;
-        const oldCustom = editingMedicine!.custom_dose_times?.length || 0;
-        if (oldFreq !== newFreq || oldCustom !== (customTimes ? newFreq : 0)) {
-          await deleteMedicineLogsForMedicine(editingMedicine!.id);
-          const todayISO = new Date().toISOString().split("T")[0];
-          queryClient.invalidateQueries({ queryKey: ["medicine_logs", userId, todayISO] });
-        }
-        return await updateMedicineLocal({ ...payload, id: editingMedicine!.id });
+        // Update the medicine itself
+        const updatedMedicine = await updateMedicineLocal({ ...payload, id: editingMedicine.id });
+
+        // Recreate logs for today and future
+        await createMedicineLogsForMedicine(updatedMedicine);
+
+        return updatedMedicine;
       }
 
-      return await createMedicineLocal(payload);
+      // For new medicine
+      const newMedicine = await createMedicineLocal(payload);
+      await createMedicineLogsForMedicine(newMedicine);
+      return newMedicine;
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["medicines", userId] });
@@ -151,6 +155,7 @@ export function AddMedicineDialog({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+
     if (!name || !frequency || !durationDays) {
       toast.error("Please fill in all fields");
       return;
@@ -158,7 +163,7 @@ export function AddMedicineDialog({
 
     const freq = parseInt(frequency);
 
-    // ---- Custom dose validation ----
+    // Custom dose validation
     if (customTimes) {
       const trimmedTimes = customDoseTimes.slice(0, freq);
       setCustomDoseTimes(trimmedTimes);
@@ -175,7 +180,7 @@ export function AddMedicineDialog({
       return;
     }
 
-    // ---- Duplicate check ----
+    // Duplicate check
     const now = new Date();
     const duplicate = existingMedicines?.find((m: any) => {
       if (isEditing && m.id === editingMedicine?.id) return false;
@@ -192,7 +197,7 @@ export function AddMedicineDialog({
       (m: any) => (m.trade_name || "").toLowerCase() === name.toLowerCase()
     );
 
-    // ---- Build payload ----
+    // Build payload
     const payload: any = {
       user_id: userId,
       name,
@@ -208,6 +213,32 @@ export function AddMedicineDialog({
     if (!customTimes && freq > 3) payload.dose_interval_hours = parseInt(doseInterval);
 
     mutation.mutate(payload);
+
+    // Schedule local notifications
+    try {
+      const scheduleTimes: Date[] = [];
+      if (customTimes && customDoseTimes.length) {
+        customDoseTimes.forEach((t) => {
+          const today = new Date();
+          const [h, m] = t.split(":").map(Number);
+          today.setHours(h, m, 0, 0);
+          scheduleTimes.push(today);
+        });
+      } else if (!customTimes && freq > 0) {
+        const now = new Date();
+        const startHour = now.getHours();
+        const interval = parseInt(doseInterval || "6");
+        for (let i = 0; i < freq; i++) {
+          const t = new Date();
+          t.setHours(startHour + i * interval, 0, 0, 0);
+          scheduleTimes.push(t);
+        }
+      }
+
+      await scheduleDoseNotifications(name, scheduleTimes);
+    } catch (err) {
+      console.error("Notification scheduling failed:", err);
+    }
   };
 
   const freq = parseInt(frequency) || 0;
@@ -235,7 +266,10 @@ export function AddMedicineDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent
+        className="sm:max-w-md max-h-[85vh] overflow-y-auto overscroll-contain px-4 pb-20"
+        style={{ WebkitOverflowScrolling: "touch" }}
+      >
         <DialogHeader>
           <DialogTitle>{isEditing ? "Edit Medicine" : "Add New Medicine"}</DialogTitle>
           <DialogDescription>
@@ -324,7 +358,7 @@ export function AddMedicineDialog({
             </RadioGroup>
           </div>
 
-          {/* Custom‑times toggle */}
+          {/* Custom-times toggle */}
           {freq > 0 && (
             <div className="flex items-center justify-between">
               <Label htmlFor="custom-times" className="text-sm">
@@ -386,6 +420,7 @@ export function AddMedicineDialog({
                             {new Date(`2025-01-01T${t}`).toLocaleTimeString([], {
                               hour: "numeric",
                               minute: "2-digit",
+                              hour12: true, // <-- force 12-hour format
                             })}
                           </SelectItem>
                         ))}

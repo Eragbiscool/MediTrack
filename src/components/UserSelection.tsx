@@ -1,3 +1,7 @@
+// At the top of the component, before return
+const today = new Date().toISOString().split("T")[0]; // "YYYY-MM-DD"
+
+
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { createUserLocal, getUsersLocal } from "@/data/db";
@@ -72,6 +76,14 @@ export function UserSelection({ onUserSelect }: UserSelectionProps) {
       toast.error("Please fill in all fields");
       return;
     }
+
+    const selectedDate = new Date(dateOfBirth);
+    const today = new Date();
+    if (selectedDate > today) {
+      toast.error("Date of birth cannot be in the future");
+      return;
+    }
+    
     createUser.mutate({ name, date_of_birth: dateOfBirth });
   };
 
@@ -172,6 +184,7 @@ export function UserSelection({ onUserSelect }: UserSelectionProps) {
                   value={dateOfBirth}
                   onChange={(e) => setDateOfBirth(e.target.value)}
                   required
+                  max={today}
                 />
               </div>
               <div className="flex gap-3 pt-2">
@@ -210,6 +223,7 @@ export function UserSelection({ onUserSelect }: UserSelectionProps) {
                 value={verifyDob}
                 onChange={(e) => setVerifyDob(e.target.value)}
                 required
+                max={today}
               />
             </div>
             <div className="flex gap-3">

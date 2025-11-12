@@ -1,5 +1,7 @@
 import Dexie from "dexie";
 import { v4 as uuidv4 } from "uuid";
+import { addDays, isAfter } from "date-fns";
+
 
 export interface User {
   id: string;
@@ -155,24 +157,31 @@ export async function getMedicineLogsForDateLocal(userId: string, dateISO: strin
     .toArray();
 }
 
+/**
+ * Remove a user and all associated data from local DB
+ * @param userId - the ID of the user to remove
+ */
+export async function removeUserLocal(userId: string): Promise<void> {
+  try {
+    // 1️⃣ Delete all medicines of the user
+    const userMedicines = await db.medicines.where("user_id").equals(userId).toArray();
+    const medicineIds = userMedicines.map((m) => m.id);
 
-// export async function deleteMedicineLogsForMedicine(medicineId: string) {
-//   const db = await getDB();               // your IndexedDB init function
-//   const tx = db.transaction("medicine_logs", "readwrite");
-//   const store = tx.objectStore("medicine_logs");
-//   const index = store.index("medicine_id");
-//   const range = IDBKeyRange.only(medicineId);
+    // Delete all logs for each medicine
+    await Promise.all(
+      medicineIds.map((id) => db.medicine_logs.where("medicine_id").equals(id).delete())
+    );
 
-//   const cursorReq = index.openCursor(range);
-//   cursorReq.onsuccess = () => {
-//     const cursor = cursorReq.result;
-//     if (cursor) {
-//       cursor.delete();
-//       cursor.continue();
-//     }
-//   };
-//   await tx.done;
-// }
+    // Delete medicines
+    await db.medicines.where("user_id").equals(userId).delete();
+
+    // 2️⃣ Delete the user itself
+    await db.users.where("id").equals(userId).delete();
+  } catch (err) {
+    console.error("Failed to remove user:", err);
+    throw err; // propagate error to caller
+  }
+}
 
 export async function deleteMedicineLogsForMedicine(medicineId: string) {
   // Using Dexie query to delete all matching logs
@@ -180,4 +189,69 @@ export async function deleteMedicineLogsForMedicine(medicineId: string) {
     .where("medicine_id")
     .equals(medicineId)
     .delete();
+}
+
+/**
+ * Generate or update medicine logs for a medicine.
+ * - Keeps past taken logs untouched
+ * - Only creates logs for today and future days
+ * - Supports both custom dose times and interval-based dosing
+ */
+export async function createMedicineLogsForMedicine(medicine: Medicine) {
+  const today = new Date();
+  const existingLogs: MedicineLog[] = await db.medicine_logs
+    .where("medicine_id")
+    .equals(medicine.id)
+    .toArray();
+
+  // Keep logs that are already taken or from past days
+  const logsToKeep = existingLogs.filter(
+    (log) => log.status === "taken" || new Date(log.scheduled_date) < today
+  );
+
+  const newLogs: MedicineLog[] = [];
+
+  for (let day = 0; day < medicine.duration_days; day++) {
+    const scheduledDate = addDays(new Date(medicine.start_date), day);
+    if (isAfter(today, scheduledDate)) continue;
+
+    const times: string[] = [];
+
+    if (medicine.custom_dose_times?.length) {
+      times.push(...medicine.custom_dose_times);
+    } else if (medicine.frequency && medicine.frequency > 0) {
+      const interval = medicine.dose_interval_hours || Math.floor(15 / medicine.frequency);
+      for (let i = 0; i < medicine.frequency; i++) {
+        const hour = i * interval;
+        const hh = String(hour).padStart(2, "0");
+        times.push(`${hh}:00:00`);
+      }
+    }
+
+    times.forEach((t) => {
+      const exists = logsToKeep.find(
+        (l) =>
+          l.scheduled_date === scheduledDate.toISOString().split("T")[0] &&
+          l.scheduled_time === t
+      );
+      if (!exists) {
+        newLogs.push({
+          id: uuidv4(),
+          medicine_id: medicine.id,
+          scheduled_date: scheduledDate.toISOString().split("T")[0],
+          scheduled_time: t,
+          status: "pending",
+          taken_at: null,
+          created_at: new Date().toISOString(),
+        });
+      }
+    });
+  }
+
+  // Insert new logs
+  for (const log of newLogs) {
+    await db.medicine_logs.add(log);
+  }
+
+  return [...logsToKeep, ...newLogs];
 }
