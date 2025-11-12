@@ -39,7 +39,10 @@ export async function updateMedicineLogStatusLocal(
   takenAt?: string
 ) {
   const updates: Partial<MedicineLog> = { status };
-  if (takenAt) updates.taken_at = takenAt;
+
+  // Always store ISO time properly
+  updates.taken_at = takenAt || new Date().toISOString();
+
   const count = await db.medicine_logs.update(logId, updates);
   if (count === 0) throw new Error("Log not found");
   return true;
